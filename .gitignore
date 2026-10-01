@@ -4,3 +4,4 @@ server/uploads/*
 !server/uploads/.gitkeep
 !server/uploads/demo-lesson.png
 .env
+.ds_store
