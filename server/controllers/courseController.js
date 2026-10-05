@@ -20,7 +20,7 @@ export async function getCourseTree(id) {
   if (!course) return null;
   const weeks = await Week.find({ courseId: id }).sort({ order: 1, createdAt: 1 }).lean();
   const days = await Day.find({ weekId: { $in: weeks.map(week => week._id) } }).sort({ order: 1, createdAt: 1 }).lean();
-  const lessons = await Lesson.find({ dayId: { $in: days.map(day => day._id) } }, 'dayId title order updatedAt').sort({ order: 1, createdAt: 1 }).lean();
+  const lessons = await Lesson.find({ dayId: { $in: days.map(day => day._id) } }, 'dayId title content blocks hasHomework order updatedAt').sort({ order: 1, createdAt: 1 }).lean();
   return {
     ...course,
     weeks: weeks.map(week => ({
@@ -31,6 +31,45 @@ export async function getCourseTree(id) {
       }))
     }))
   };
+}
+
+export async function unlockedLessonIdsForStudent(course, userId) {
+  if (!course || (course.moderationStatus && course.moderationStatus !== 'approved')) return new Set();
+  const orderedLessons = (course?.weeks || []).flatMap(week => week.days.flatMap(day => day.lessons));
+  if (!orderedLessons.length) return new Set();
+  const completions = await Completion.find({ userId, lessonId: { $in: orderedLessons.map(lesson => lesson._id) } }, 'lessonId').lean();
+  const completedIds = new Set(completions.map(item => String(item.lessonId)));
+  const unlockedIds = new Set();
+  let nextAvailableAdded = false;
+  for (const lesson of orderedLessons) {
+    const id = String(lesson._id);
+    if (completedIds.has(id)) unlockedIds.add(id);
+    else if (!nextAvailableAdded) { unlockedIds.add(id); nextAvailableAdded = true; }
+  }
+  return unlockedIds;
+}
+
+export async function applyStudentLessonLocks(course, user) {
+  if (!course || user?.role !== 'student') return course;
+  const unlockedIds = await unlockedLessonIdsForStudent(course, user._id);
+  return {
+    ...course,
+    weeks: course.weeks.map(week => ({
+      ...week,
+      days: week.days.map(day => ({
+        ...day,
+        lessons: day.lessons.map(lesson => unlockedIds.has(String(lesson._id))
+          ? { ...lesson, locked: false }
+          : { ...lesson, locked: true, content: '', blocks: [], hasHomework: false })
+      }))
+    }))
+  };
+}
+
+export async function studentCanOpenLesson(courseId, lessonId, userId) {
+  const course = await getCourseTree(courseId);
+  if (!course) return false;
+  return (await unlockedLessonIdsForStudent(course, userId)).has(String(lessonId));
 }
 
 export async function deleteCourseTree(id) {

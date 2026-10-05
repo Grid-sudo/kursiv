@@ -15,7 +15,11 @@ export async function courseForResource(kind, id) {
 
 export function canReadCourse(user, course) {
   if (!user || !course) return false;
-  return user.role !== 'student' || user.assignedCourses.some(id => String(id) === String(course._id));
+  const published = !course.moderationStatus || course.moderationStatus === 'approved';
+  if (user.role === 'admin') return true;
+  if (user.role === 'teacher') return String(course.createdBy) === String(user._id) || published;
+  if (!published) return false;
+  return user.role === 'student' ? user.assignedCourses.some(id => String(id) === String(course._id)) : true;
 }
 
 export function canEditCourse(user, course) {

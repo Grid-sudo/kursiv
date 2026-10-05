@@ -14,6 +14,8 @@ const dateLabel = date => date ? new Date(date).toLocaleDateString('ru-RU', { da
 const dueTone = date => date && new Date(date).setHours(23, 59, 59, 999) < Date.now() ? 'is-overdue' : '';
 
 export default function Homeworks({ user, navigate }) {
+  const targetStudentId = user.role === 'curator' ? new URLSearchParams(window.location.search).get('studentId') || '' : '';
+  const teacherReview = user.role === 'teacher' && new URLSearchParams(window.location.search).get('review') === '1';
   const [items, setItems] = useState([]);
   const [courses, setCourses] = useState([]);
   const [error, setError] = useState('');
@@ -22,8 +24,8 @@ export default function Homeworks({ user, navigate }) {
   const [draft, setDraft] = useState({ title: '', description: '', courseId: '', dueDate: '' });
   const [filter, setFilter] = useState('all');
   const [query, setQuery] = useState('');
-  const load = async () => { try { setItems(await api('/homeworks')); setError(''); } catch (e) { setError(e.message); } };
-  useEffect(() => { load(); api('/courses').then(setCourses).catch(() => {}); }, []);
+  const load = async () => { try { setItems(await api(targetStudentId ? `/homeworks?studentId=${encodeURIComponent(targetStudentId)}` : teacherReview ? '/homeworks?review=1' : '/homeworks')); setError(''); } catch (e) { setError(e.message); } };
+  useEffect(() => { load(); api('/courses').then(setCourses).catch(() => {}); }, [targetStudentId, teacherReview]);
   const courseNames = useMemo(() => Object.fromEntries(courses.map(course => [String(course._id), course.title])), [courses]);
   const counts = useMemo(() => items.reduce((result, item) => { const key = displayStatus(item.submission?.status, item.submission?.curatorViewedAt).tone; result.all++; result[key]++; return result; }, { all: 0, todo: 0, sent: 0, reviewing: 0, done: 0, revision: 0 }), [items]);
   const visibleItems = useMemo(() => items.filter(item => {
@@ -47,7 +49,9 @@ export default function Homeworks({ user, navigate }) {
 
   return <main className="account-page homework-hub"><div className="account-width homework-hub-width">
     <button className="back-link" onClick={() => navigate('/dashboard')}><ArrowLeft size={17} /> В кабинет</button>
-    <div className="homework-page-heading"><div><div className="eyebrow muted">ОБУЧЕНИЕ</div><h1>Домашние работы</h1><p>{isStudent ? 'Все задания, сроки и ваши отправленные работы — в одном месте.' : isCurator ? 'Работы учеников, которым вы помогаете.' : 'Управляйте заданиями и проверяйте отправленные работы.'}</p></div>{canCreate && <button className="primary-button" onClick={() => setForm(value => !value)}><Plus size={17} />{form ? 'Скрыть форму' : 'Новое задание'}</button>}</div>
+    <div className="homework-page-heading"><div><div className="eyebrow muted">ОБУЧЕНИЕ</div><h1>{targetStudentId ? 'Работы ученика' : teacherReview ? 'Работы на проверку' : 'Домашние работы'}</h1><p>{isStudent ? 'Все задания, сроки и ваши отправленные работы — в одном месте.' : targetStudentId ? 'Отправленные работы этого ученика.' : isCurator ? 'Работы учеников, которым вы помогаете.' : teacherReview ? 'Задания с новыми отправками учеников.' : 'Управляйте заданиями и проверяйте отправленные работы.'}</p></div>{canCreate && <button className="primary-button" onClick={() => setForm(value => !value)}><Plus size={17} />{form ? 'Скрыть форму' : 'Новое задание'}</button>}</div>
+    {targetStudentId && <div className="homework-student-filter-banner"><span>Показаны отправленные работы выбранного ученика</span><button onClick={() => navigate('/homeworks')}>Показать все домашние работы</button></div>}
+    {teacherReview && <div className="homework-student-filter-banner"><span>Показаны только задания с работами на проверке</span><button onClick={() => navigate('/homeworks')}>Показать все задания</button></div>}
     {error && <div className="form-error homework-page-error">{error}</div>}
     {form && <form className="homework-create-form" onSubmit={create}><div className="homework-create-heading"><div><span className="homework-section-kicker">НОВОЕ ЗАДАНИЕ</span><h2>Добавить домашнюю работу</h2></div><button type="button" className="homework-close-form" onClick={() => setForm(false)} aria-label="Закрыть форму"><X size={18}/></button></div><div className="homework-create-grid"><label>Название задания<input required value={draft.title} onChange={e => setDraft({ ...draft, title: e.target.value })} placeholder="Например, практика по теме урока" /></label><label>Курс<select required value={draft.courseId} onChange={e => setDraft({ ...draft, courseId: e.target.value })}><option value="">Выберите курс</option>{courses.map(course => <option key={course._id} value={course._id}>{course.title}</option>)}</select></label><label>Срок сдачи<input type="date" value={draft.dueDate} onChange={e => setDraft({ ...draft, dueDate: e.target.value })} /></label><label className="homework-create-description">Описание<textarea rows={3} value={draft.description} onChange={e => setDraft({ ...draft, description: e.target.value })} placeholder="Опишите, что нужно сделать" /></label><label className="homework-create-files"><span>Материалы к заданию</span><span className="homework-file-picker"><Upload size={16}/>Выбрать файлы<input name="homeworkFiles" type="file" multiple /></span></label></div><button className="primary-button" disabled={creating}>{creating ? 'Создаём…' : 'Создать задание'}</button></form>}
 
@@ -55,15 +59,15 @@ export default function Homeworks({ user, navigate }) {
 
     {isStudent && items.length > 0 && <div className="homework-toolbar"><div className="homework-filters">{[['all', 'Все'], ['todo', 'Не отправлено'], ['sent', 'Отправлено'], ['reviewing', 'Проверяется'], ['done', 'Проверено'], ['revision', 'Доработка']].map(([key, label]) => <button key={key} className={filter === key ? 'active' : ''} onClick={() => setFilter(key)}>{label}<span>{counts[key]}</span></button>)}</div><input className="homework-search" value={query} onChange={e => setQuery(e.target.value)} placeholder="Найти задание" aria-label="Найти задание" /></div>}
 
-    {visibleItems.length > 0 ? <div className="homework-list">{visibleItems.map(item => <HomeworkCard key={item._id} item={item} user={user} courseTitle={courseNames[String(item.courseId)]} onChange={load} attach={attach} />)}</div> : <section className="homework-empty"><span className="homework-empty-icon"><CheckCircle2 size={24}/></span><h2>{items.length ? 'Заданий не найдено' : isStudent ? 'Домашних заданий пока нет' : 'Пока нет домашних работ'}</h2><p>{items.length ? 'Измените фильтр или поисковый запрос.' : isStudent ? 'Когда учитель добавит задание к курсу, оно появится здесь.' : canCreate ? 'Создайте первое задание для своих учеников.' : 'Задания учеников появятся здесь, когда они будут назначены.'}</p>{canCreate && !form && <button className="outline-button" onClick={() => setForm(true)}><Plus size={16}/>Создать задание</button>}</section>}
+    {visibleItems.length > 0 ? <div className="homework-list">{visibleItems.map(item => <HomeworkCard key={item._id} item={item} user={user} targetStudentId={targetStudentId} courseTitle={courseNames[String(item.courseId)]} onChange={load} attach={attach} />)}</div> : <section className="homework-empty"><span className="homework-empty-icon"><CheckCircle2 size={24}/></span><h2>{teacherReview ? 'Работ на проверке нет' : items.length ? 'Заданий не найдено' : targetStudentId ? 'Отправленных работ пока нет' : isStudent ? 'Домашних заданий пока нет' : 'Пока нет домашних работ'}</h2><p>{teacherReview ? 'Новые отправки учеников появятся здесь.' : items.length ? 'Измените фильтр или поисковый запрос.' : targetStudentId ? 'Когда ученик отправит домашнюю работу, она появится здесь.' : isStudent ? 'Когда учитель добавит задание к курсу, оно появится здесь.' : canCreate ? 'Создайте первое задание для своих учеников.' : 'Задания учеников появятся здесь, когда они будут назначены.'}</p>{canCreate && !form && !teacherReview && <button className="outline-button" onClick={() => setForm(true)}><Plus size={16}/>Создать задание</button>}</section>}
   </div></main>;
 }
 
-function HomeworkCard({ item, user, courseTitle, onChange, attach }) {
+function HomeworkCard({ item, user, targetStudentId, courseTitle, onChange, attach }) {
   const [files, setFiles] = useState(item.submission?.attachments || []);
   const [studentComment, setStudentComment] = useState(item.submission?.studentComment || '');
-  const [rows, setRows] = useState([]);
-  const [viewing, setViewing] = useState(false);
+  const [rows, setRows] = useState(item.submission ? [item.submission] : []);
+  const [viewing, setViewing] = useState(Boolean(item.submission && targetStudentId));
   const [busy, setBusy] = useState(false);
   const [cardError, setCardError] = useState('');
   const isStudent = user.role === 'student';
@@ -74,11 +78,19 @@ function HomeworkCard({ item, user, courseTitle, onChange, attach }) {
     const result = await put(`/homeworks/${item._id}/submission`, { attachments, studentComment: comment, mode });
     setFiles(result.attachments || []); setStudentComment(result.studentComment || '');
   };
+  useEffect(() => {
+    if (!targetStudentId || user.role !== 'curator' || !item.submission?.submittedAt || item.submission.curatorViewedAt) return;
+    api(`/homeworks/${item._id}/submissions/${item.submission._id}/read`, { method: 'PATCH', body: JSON.stringify({}) }).then(() => {
+      const viewedAt = new Date().toISOString();
+      setRows([{ ...item.submission, curatorViewedAt: viewedAt }]);
+      window.dispatchEvent(new Event('homework-notifications-updated'));
+    }).catch(err => setCardError(err.message));
+  }, [item._id, targetStudentId, user.role]);
   const openSubmissions = async () => {
     if (viewing) { setViewing(false); return; }
     setBusy(true); setCardError('');
     try {
-      const submissions = await api(`/homeworks/${item._id}/submissions`);
+      const submissions = item.submission ? [item.submission] : await api(`/homeworks/${item._id}/submissions`);
       if (user.role === 'curator') {
         const unread = submissions.filter(row => row.submittedAt && !row.curatorViewedAt);
         await Promise.all(unread.map(row => api(`/homeworks/${item._id}/submissions/${row._id}/read`, { method: 'PATCH', body: JSON.stringify({}) })));

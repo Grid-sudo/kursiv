@@ -14,17 +14,19 @@ import Completion from '../models/Completion.js';
 import Homework from '../models/Homework.js';
 import HomeworkSubmission from '../models/HomeworkSubmission.js';
 import User from '../models/User.js';
-import { getCourseTree, deleteCourseTree, deleteWeekTree, deleteDayTree } from '../controllers/courseController.js';
+import LandingContent from '../models/LandingContent.js';
+import { getCourseTree, applyStudentLessonLocks, unlockedLessonIdsForStudent, studentCanOpenLesson, deleteCourseTree, deleteWeekTree, deleteDayTree } from '../controllers/courseController.js';
 import { optionalAuth, requireAuth, allowRoles } from '../middleware/auth.js';
 import { requireCourse, courseForResource } from '../middleware/courseAccess.js';
 
 const router = Router();
-const uploadDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../uploads');
+const defaultUploadDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../uploads');
+const getUploadDir = () => path.resolve(process.env.UPLOAD_DIR || defaultUploadDir);
 const allowed = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'video/mp4', 'video/webm', 'application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.openxmlformats-officedocument.presentationml.presentation', 'application/zip', 'application/x-zip-compressed', 'text/plain']);
 const extension = new Map([['image/jpeg', '.jpg'], ['image/png', '.png'], ['image/webp', '.webp'], ['image/gif', '.gif'], ['video/mp4', '.mp4'], ['video/webm', '.webm'], ['application/pdf', '.pdf'], ['application/vnd.openxmlformats-officedocument.wordprocessingml.document', '.docx'], ['application/vnd.openxmlformats-officedocument.presentationml.presentation', '.pptx'], ['application/zip', '.zip'], ['application/x-zip-compressed', '.zip'], ['text/plain', '.txt']]);
 const uploader = multer({
   storage: multer.diskStorage({
-    destination: uploadDir,
+    destination: (_req, _file, cb) => cb(null, getUploadDir()),
     filename: (_req, file, cb) => cb(null, `${randomUUID()}${extension.get(file.mimetype) || ''}`)
   }),
   fileFilter: (_req, file, cb) => cb(null, allowed.has(file.mimetype)),
@@ -36,14 +38,71 @@ const valid = id => mongoose.isValidObjectId(id);
 const badId = (res, id) => !valid(id) && (res.status(400).json({ error: 'Некорректный идентификатор' }), true);
 const notFound = res => res.status(404).json({ error: 'Не найдено' });
 
+const defaultLandingContent = {
+  contacts: [],
+  faqs: [
+    { question: 'Как получить доступ к курсу?', answer: 'Войдите в аккаунт — назначенные вам курсы появятся в кабинете. Если курса нет, обратитесь к куратору.' },
+    { question: 'Кто проверяет домашние задания?', answer: 'Отправленная работа поступает куратору. Он проверит её и оставит комментарий или вернёт на доработку.' },
+    { question: 'Как отправить домашнее задание?', answer: 'Откройте задание в уроке, прикрепите файл и нажмите «Отправить куратору». Статус и комментарий проверки будут видны там же.' }
+  ]
+};
+
+router.get('/landing-content', async (_req, res) => {
+  const content = await LandingContent.findOne({ key: 'landing' }).lean();
+  res.json(content ? { contacts: content.contacts || [], faqs: content.faqs || [] } : defaultLandingContent);
+});
+
+router.put('/admin/landing-content', requireAuth, allowRoles('admin'), async (req, res) => {
+  const contacts = Array.isArray(req.body?.contacts) ? req.body.contacts.slice(0, 12).map(item => ({
+    label: String(item?.label || '').trim().slice(0, 80),
+    value: String(item?.value || '').trim().slice(0, 300),
+    href: String(item?.href || '').trim().slice(0, 600)
+  })).filter(item => item.label && item.value) : [];
+  const faqs = Array.isArray(req.body?.faqs) ? req.body.faqs.slice(0, 20).map(item => ({
+    question: String(item?.question || '').trim().slice(0, 300),
+    answer: String(item?.answer || '').trim().slice(0, 2000)
+  })).filter(item => item.question && item.answer) : [];
+  for (const contact of contacts) {
+    if (contact.href && !/^(https?:\/\/|mailto:|tel:)/i.test(contact.href)) return res.status(400).json({ error: 'Ссылка должна начинаться с https://, http://, mailto: или tel:.' });
+  }
+  const content = await LandingContent.findOneAndUpdate({ key: 'landing' }, { $set: { contacts, faqs } }, { new: true, upsert: true, runValidators: true }).lean();
+  res.json({ contacts: content.contacts, faqs: content.faqs });
+});
+
 router.get('/homeworks', requireAuth, async (req, res) => {
   let query = req.user.role === 'student' ? { courseId: { $in: req.user.assignedCourses } } : req.user.role === 'teacher' ? { createdBy: req.user._id } : {};
+  let targetStudent = null;
   if (req.user.role === 'curator') {
-    const students = await User.find({ curatorId: req.user._id, role: 'student' }, 'assignedCourses').lean();
-    query = { courseId: { $in: [...new Set(students.flatMap(student => student.assignedCourses.map(String)))] } };
+    if (req.query.studentId) {
+      if (!valid(req.query.studentId)) return res.status(400).json({ error: 'Некорректный идентификатор ученика' });
+      targetStudent = await User.findOne({ _id: req.query.studentId, curatorId: req.user._id, role: 'student' }, 'assignedCourses').lean();
+      if (!targetStudent) return notFound(res);
+      query = { courseId: { $in: targetStudent.assignedCourses || [] } };
+    } else {
+      const students = await User.find({ curatorId: req.user._id, role: 'student' }, 'assignedCourses').lean();
+      query = { courseId: { $in: [...new Set(students.flatMap(student => student.assignedCourses.map(String)))] } };
+    }
   }
   if (req.query.lessonId && valid(req.query.lessonId)) query.lessonId = req.query.lessonId;
-  const items = await Homework.find(query).sort({ dueDate: 1, createdAt: -1 }).lean();
+  let items = await Homework.find(query).sort({ dueDate: 1, createdAt: -1 }).lean();
+  if (req.user.role === 'teacher' && req.query.review === '1') {
+    const homeworkIds = items.map(item => item._id);
+    const pendingIds = await HomeworkSubmission.distinct('homeworkId', { homeworkId: { $in: homeworkIds }, submittedAt: { $ne: null }, status: 'На проверке' });
+    const pendingSet = new Set(pendingIds.map(String));
+    return res.json(items.filter(item => pendingSet.has(String(item._id))));
+  }
+  if (req.user.role === 'student') {
+    const unlocked = new Set();
+    for (const courseId of new Set(items.map(item => String(item.courseId)))) {
+      const tree = await getCourseTree(courseId);
+      if (tree) for (const lessonId of await unlockedLessonIdsForStudent(tree, req.user._id)) unlocked.add(String(lessonId));
+    }
+    items = items.filter(item => !item.lessonId || unlocked.has(String(item.lessonId)));
+  }
+  if (targetStudent) {
+    const submissions = await HomeworkSubmission.find({ studentId: targetStudent._id, homeworkId: { $in: items.map(item => item._id) }, submittedAt: { $ne: null } }).populate('studentId', 'firstName lastName email').lean();
+    return res.json(items.map(item => ({ ...item, submission: submissions.find(entry => String(entry.homeworkId) === String(item._id)) || null })).filter(item => item.submission));
+  }
   if (req.user.role !== 'student') return res.json(items);
   const submissions = await HomeworkSubmission.find({ studentId: req.user._id, homeworkId: { $in: items.map(item => item._id) } }).lean();
   return res.json(items.map(item => ({ ...item, submission: submissions.find(entry => String(entry.homeworkId) === String(item._id)) || null })));
@@ -71,6 +130,7 @@ router.put('/homeworks/:id/submission', requireAuth, allowRoles('student'), asyn
   if (badId(res, req.params.id)) return;
   const homework = await Homework.findById(req.params.id);
   if (!homework || !req.user.assignedCourses.some(id => String(id) === String(homework.courseId))) return notFound(res);
+  if (homework.lessonId && !await studentCanOpenLesson(homework.courseId, homework.lessonId, req.user._id)) return res.status(423).json({ error: 'Это домашнее задание откроется после предыдущего урока.' });
   const attachments = Array.isArray(req.body.attachments) ? req.body.attachments : [];
   const uploadIds = attachments.map(file => file.uploadId).filter(Boolean);
   if (uploadIds.length && await Upload.countDocuments({ _id: { $in: uploadIds }, ownerId: req.user._id }) !== new Set(uploadIds.map(String)).size) return res.status(403).json({ error: 'Один из файлов недоступен. Прикрепите его ещё раз.' });
@@ -117,15 +177,84 @@ router.patch('/homeworks/:id/submissions/:submissionId', requireAuth, allowRoles
   return submission ? res.json(submission) : notFound(res);
 });
 
-router.get('/courses', optionalAuth, async (req, res) => res.json(await Course.find(req.user?.role === 'student' ? { _id: { $in: req.user.assignedCourses } } : {}).sort({ updatedAt: -1 }).lean()));
+router.get('/courses', optionalAuth, async (req, res) => {
+  let filter;
+  if (req.user?.role === 'admin') filter = {};
+  else if (req.user?.role === 'teacher') filter = { $or: [{ createdBy: req.user._id }, { moderationStatus: 'approved' }] };
+  else {
+    filter = { moderationStatus: 'approved' };
+    if (req.user?.role === 'student') filter._id = { $in: req.user.assignedCourses };
+  }
+  res.json(await Course.find(filter).sort({ updatedAt: -1 }).lean());
+});
 router.post('/courses', requireAuth, allowRoles('admin', 'teacher'), async (req, res) => {
-  const course = await Course.create({ ...pick(req.body, ['title', 'description', 'cover']), createdBy: req.user._id });
+  const course = await Course.create({ ...pick(req.body, ['title', 'description', 'cover']), createdBy: req.user._id, moderationStatus: req.user.role === 'admin' ? 'approved' : 'pending', moderationSubmittedAt: req.user.role === 'teacher' ? new Date() : null });
   res.status(201).json(course);
+});
+router.post('/courses/:id/duplicate', requireAuth, allowRoles('admin', 'teacher'), requireCourse('course', 'edit'), async (req, res) => {
+  if (badId(res, req.params.id)) return;
+  const source = await getCourseTree(req.params.id);
+  if (!source) return notFound(res);
+  const duplicate = await Course.create({ title: `${source.title} — копия`, description: source.description, cover: source.cover, coverSettings: source.coverSettings, createdBy: req.user._id, moderationStatus: req.user.role === 'admin' ? 'approved' : 'pending', moderationSubmittedAt: req.user.role === 'teacher' ? new Date() : null });
+  const homeworkItems = await Homework.find({ courseId: source._id }).lean();
+  const lessonMap = new Map();
+  try {
+    for (const week of source.weeks) {
+      const newWeek = await Week.create({ courseId: duplicate._id, title: week.title, description: week.description, order: week.order });
+      for (const day of week.days) {
+        const newDay = await Day.create({ weekId: newWeek._id, title: day.title, description: day.description, order: day.order });
+        for (const lesson of day.lessons) {
+          const newLesson = await Lesson.create({ dayId: newDay._id, title: lesson.title, content: lesson.content, blocks: lesson.blocks, hasHomework: lesson.hasHomework, order: lesson.order });
+          lessonMap.set(String(lesson._id), newLesson._id);
+        }
+      }
+    }
+    for (const item of homeworkItems) {
+      const lessonId = item.lessonId ? lessonMap.get(String(item.lessonId)) : null;
+      if (item.lessonId && !lessonId) continue;
+      await Homework.create({ title: item.title, description: item.description, courseId: duplicate._id, lessonId, createdBy: req.user._id, attachments: item.attachments });
+    }
+  } catch (error) {
+    await deleteCourseTree(duplicate._id);
+    throw error;
+  }
+  res.status(201).json(await getCourseTree(duplicate._id));
+});
+router.get('/admin/courses/pending', requireAuth, allowRoles('admin'), async (_req, res) => {
+  res.json(await Course.find({ moderationStatus: 'pending' }).populate('createdBy', 'firstName lastName email').sort({ moderationSubmittedAt: 1, createdAt: 1 }).lean());
+});
+router.patch('/admin/courses/:id/approval', requireAuth, allowRoles('admin'), async (req, res) => {
+  if (badId(res, req.params.id)) return;
+  const { decision } = req.body || {};
+  if (!['approve', 'changes_requested'].includes(decision)) return res.status(400).json({ error: 'Выберите решение по курсу.' });
+  const course = await Course.findById(req.params.id);
+  if (!course) return notFound(res);
+  if (course.moderationStatus !== 'pending') return res.status(409).json({ error: 'Этот курс уже рассмотрен.' });
+  const comment = String(req.body.comment || '').trim().slice(0, 1000);
+  if (decision === 'changes_requested' && !comment) return res.status(400).json({ error: 'Добавьте комментарий с необходимыми правками.' });
+  course.moderationStatus = decision === 'approve' ? 'approved' : 'changes_requested';
+  course.moderationComment = decision === 'approve' ? '' : comment;
+  course.moderationReviewedAt = new Date();
+  course.moderationReviewedBy = req.user._id;
+  await course.save();
+  res.json(course);
+});
+router.post('/courses/:id/submit-review', requireAuth, allowRoles('teacher'), requireCourse('course', 'edit'), async (req, res) => {
+  if (badId(res, req.params.id)) return;
+  const course = req.course;
+  if (course.moderationStatus !== 'changes_requested') return res.status(409).json({ error: 'Отправить на проверку можно после внесения запрошенных правок.' });
+  course.moderationStatus = 'pending';
+  course.moderationComment = '';
+  course.moderationSubmittedAt = new Date();
+  course.moderationReviewedAt = null;
+  course.moderationReviewedBy = null;
+  await course.save();
+  res.json(course);
 });
 router.get('/courses/:id', requireAuth, requireCourse('course', 'read'), async (req, res) => {
   if (badId(res, req.params.id)) return;
   const course = await getCourseTree(req.params.id);
-  return course ? res.json(course) : notFound(res);
+  return course ? res.json(await applyStudentLessonLocks(course, req.user)) : notFound(res);
 });
 router.put('/courses/:id', requireAuth, requireCourse('course', 'edit'), async (req, res) => {
   if (badId(res, req.params.id)) return;
@@ -180,6 +309,7 @@ router.post('/lessons', requireAuth, requireCourse('day', 'edit'), async (req, r
 });
 router.get('/lessons/:id', requireAuth, requireCourse('lesson', 'read'), async (req, res) => {
   if (badId(res, req.params.id)) return;
+  if (req.user.role === 'student' && !await studentCanOpenLesson(req.course._id, req.params.id, req.user._id)) return res.status(423).json({ error: 'Сначала завершите предыдущий урок курса.' });
   const lesson = await Lesson.findById(req.params.id).lean();
   return lesson ? res.json(lesson) : notFound(res);
 });
@@ -211,7 +341,7 @@ router.delete('/upload/:id', requireAuth, async (req, res) => {
   if (!item) return notFound(res);
   if (req.user.role !== 'admin' && String(item.ownerId) !== String(req.user._id)) return res.status(403).json({ error: 'Недостаточно прав' });
   await item.deleteOne();
-  await fs.rm(path.join(uploadDir, item.filename), { force: true });
+  await fs.rm(path.join(getUploadDir(), item.filename), { force: true });
   res.json({ ok: true });
 });
 

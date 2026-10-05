@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ArrowLeft, CircleHelp, FileText, Folder, FolderOpen } from 'lucide-react';
+import { ArrowLeft, CircleHelp, FileText, Folder, FolderOpen, LockKeyhole } from 'lucide-react';
 import { route } from '../services/navigation';
 
 const toggleItem = (setOpen, id) => setOpen(current => {
@@ -42,8 +42,8 @@ export default function LessonSidebar({ course, week, day, lesson, navigate }) {
                   </button>
                 </div>
                 {dayOpen && <div className="sidebar-tree-lessons">
-                  {entry.lessons.map((lessonItem, li) => <button key={lessonItem._id} className={`sidebar-lesson ${lessonItem._id === lesson._id ? 'active' : ''}`} onClick={() => navigate(route(course._id, item._id, entry._id, lessonItem._id))}>
-                    <FileText size={15} /><span className="sidebar-lesson-number">{li + 1}.</span><span className="sidebar-tree-title">{lessonItem.title}</span>
+                  {entry.lessons.map((lessonItem, li) => <button key={lessonItem._id} disabled={lessonItem.locked} className={`sidebar-lesson ${lessonItem._id === lesson._id ? 'active' : ''} ${lessonItem.locked ? 'is-locked' : ''}`} onClick={() => navigate(route(course._id, item._id, entry._id, lessonItem._id))}>
+                    {lessonItem.locked ? <LockKeyhole size={15} /> : <FileText size={15} />}<span className="sidebar-lesson-number">{li + 1}.</span><span className="sidebar-tree-title">{lessonItem.title}</span>
                   </button>)}
                 </div>}
               </div>;
